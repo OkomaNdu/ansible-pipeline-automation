@@ -1,0 +1,32 @@
+# Play Install Jenkins - supports Amazon Linux and Ubuntu
+- name: Install Jenkins
+  hosts: all
+  become: yes
+  tasks:
+  - name: Install on Amazon Linux
+    include_tasks: 4-host-amazon.yaml
+    when: ansible_distribution == "Amazon"
+
+  - name: Install on Ubuntu
+    include_tasks: 4-host-ubuntu.yaml
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Start Jenkins
+    service:
+      name: jenkins
+      state: started
+
+  - name: Wait 10 seconds for Jenkins to start
+    pause:
+      seconds: 10
+
+  - name: Check Jenkins port
+    command: netstat -plnt
+    register: app_status
+  - debug: msg={{ app_status.stdout_lines }}
+
+  - name: Print Jenkins admin password
+    slurp:
+      src: /var/lib/jenkins/secrets/initialAdminPassword
+    register: jenkins_pwd
+  - debug: msg={{ jenkins_pwd['content'] | b64decode }}
