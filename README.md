@@ -8,6 +8,10 @@ This project contains solutions to the Ansible module exercises of the DevOps bo
 
 Builds a Java Gradle application locally and deploys the jar to a remote Ubuntu server. Creates a Linux user on the remote server if it doesn't exist. On re-runs, stops the running app and removes the old jar before deploying the new one.
 
+### Why This Matters
+
+Manual deployments are error-prone and time-consuming. This exercise demonstrates how Ansible eliminates manual SSH steps by automating the full build-to-deploy lifecycle — building the artifact, transferring it, and managing the running process — all from a single command. This is the foundation of any CI/CD pipeline: consistent, repeatable, and human-error-free deployments.
+
 ### Architecture
 
 ```mermaid
@@ -74,6 +78,10 @@ The application is running as user `ndu` on the remote server.
 
 Pushes a locally built jar artifact to a Nexus Repository Manager `maven-snapshots` repository using an HTTP PUT request. The playbook runs entirely on localhost — no remote server required.
 
+### Why This Matters
+
+Storing build artifacts in a central repository manager is a core DevOps practice. It ensures every version of your software is versioned, traceable, and available for downstream deployments without needing to rebuild from source. This exercise demonstrates how Ansible can integrate with artifact management systems like Nexus, making artifact publishing a repeatable automated step rather than a manual upload.
+
 ### Architecture
 
 ```mermaid
@@ -126,6 +134,10 @@ Browse to **Nexus → Browse → maven-snapshots** and confirm the artifact is p
 ## Exercise 3: Install Jenkins on EC2 (Amazon Linux)
 
 Provisions an Amazon Linux EC2 instance on AWS and installs Jenkins, Docker, and Node.js on it using two separate playbooks — one for provisioning the server and one for configuring it.
+
+### Why This Matters
+
+Manually spinning up cloud servers and configuring them is slow, inconsistent, and impossible to scale. This exercise demonstrates infrastructure as code — using Ansible to dynamically provision an EC2 instance and configure it into a fully working CI server in a single automated workflow. This removes the dependency on manual AWS console clicks and guarantees the same environment is reproduced every time.
 
 ### Architecture
 
@@ -206,7 +218,115 @@ echo "<base64-password>" | base64 --decode
 ```
 Jenkins listening on port 8080
 Admin password: <redacted>
-EC2 Public IP: 16.52.168.187
+EC2 Public IP: <redacted>
 ```
 
 ![Jenkins Dashboard](images/jenkins-snapshot.png)
+
+---
+
+## Exercise 4: Install Jenkins on Ubuntu (Multi-OS Support)
+
+Extends the Jenkins provisioning to support both Amazon Linux and Ubuntu servers using a single playbook with `include_tasks` and `when` conditionals. OS-specific installation steps are split into separate task files.
+
+### Why This Matters
+
+Real-world infrastructure is rarely homogeneous — teams run a mix of operating systems across cloud providers, on-premise servers, and legacy environments. Hardcoding OS-specific logic into separate playbooks creates duplication and maintenance overhead. This exercise shows how to write a single, flexible playbook that adapts to the target environment at runtime using conditionals, making your automation portable and easier to maintain as infrastructure grows.
+
+### Architecture
+
+```mermaid
+graph LR
+    A[Local Machine\nAnsible Control Node] -->|amazon.aws module| B[AWS EC2\nAmazon Linux or Ubuntu\nt2.medium]
+    A -->|writes public IP| C[hosts]
+    A -->|SSH: include_tasks by host_os| B
+    B --> D[Jenkins :8080]
+    B --> E[Docker]
+    B --> F[Node.js v8.0.0\nvia NVM]
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `3-provision-jenkins-ec2.yaml` | Provisions EC2 and writes IP to `hosts` under `[jenkins_server]` |
+| `4-install-jenkins-ubuntu.yaml` | Main playbook — queries EC2 IP, conditionally includes OS tasks, starts Jenkins |
+| `4-host-ubuntu.yaml` | Ubuntu-specific tasks: apt, OpenJDK 21, Jenkins GPG key, Docker |
+| `4-host-amazon.yaml` | Amazon Linux-specific tasks: yum, Amazon Corretto, Jenkins repo, Docker |
+
+### Prerequisites
+
+- All Exercise 3 prerequisites apply
+- `hosts` file must have a `[jenkins_server]` group
+- Port 8080 open in Security Group / firewall
+
+### Step 1 — Provision EC2 Instance
+
+**Ubuntu:**
+```bash
+ansible-playbook 3-provision-jenkins-ec2.yaml \
+  --extra-vars "ssh_key_path=/home/ndu/Downloads/ansible.pem \
+  aws_region=ca-central-1 \
+  key_name=ansible \
+  subnet_id=subnet-0012ce5d3a6028493 \
+  ami_id=ami-073095b1f097db96d \
+  ssh_user=ubuntu"
+```
+
+**Amazon Linux:**
+```bash
+ansible-playbook 3-provision-jenkins-ec2.yaml \
+  --extra-vars "ssh_key_path=/home/ndu/Downloads/ansible.pem \
+  aws_region=ca-central-1 \
+  key_name=ansible \
+  subnet_id=subnet-0012ce5d3a6028493 \
+  ami_id=ami-0495a76ecf381a767 \
+  ssh_user=ec2-user"
+```
+
+### Step 2 — Install and Configure Jenkins
+
+Wait 2–3 minutes for the instance to fully boot, then run:
+
+**Ubuntu:**
+```bash
+ansible-playbook -i hosts 4-install-jenkins-ubuntu.yaml \
+  --extra-vars "host_os=ubuntu aws_region=ca-central-1"
+```
+
+**Amazon Linux:**
+```bash
+ansible-playbook -i hosts 4-install-jenkins-ubuntu.yaml \
+  --extra-vars "host_os=amazon-linux aws_region=ca-central-1"
+```
+
+### What the Playbook Does
+
+| Play | Action |
+|------|--------|
+| Get server IP | Queries AWS for the running `jenkins-server` public IP |
+| Prepare server | Conditionally includes `4-host-ubuntu.yaml` or `4-host-amazon.yaml` based on `host_os` |
+| Ubuntu tasks | Updates apt, installs OpenJDK 21, sets Java 21 as default, imports Jenkins GPG key, installs Jenkins and Docker |
+| Amazon Linux tasks | Installs Amazon Corretto 17, adds Jenkins yum repo, installs Jenkins and Docker |
+| Both | Installs Node.js v8.0.0 via NVM |
+| Start Jenkins | Starts Jenkins service, verifies port 8080, prints base64-encoded admin password |
+
+### Verify Deployment
+
+Access Jenkins in browser:
+```
+http://<server-public-ip>:8080
+```
+
+Decode the base64 admin password from playbook output:
+```bash
+echo "<base64-password>" | base64 --decode
+```
+
+**Actual run output (Ubuntu):**
+```
+Jenkins listening on port 8080 (tcp6 :::8080)
+Admin password (decoded): <redacted>
+```
+
+![Jenkins Dashboard - Ubuntu](images/jenkins-ubuntu-snapshot.png)
