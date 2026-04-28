@@ -205,7 +205,7 @@ echo "<base64-password>" | base64 --decode
 **Actual run output:**
 ```
 Jenkins listening on port 8080
-Admin password: 84794b58b27c4c7990fa4f38c9366ff4
+Admin password: <redacted>
 EC2 Public IP: 16.52.168.187
 ```
 
