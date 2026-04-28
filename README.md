@@ -330,3 +330,93 @@ Admin password (decoded): <redacted>
 ```
 
 ![Jenkins Dashboard - Ubuntu](images/jenkins-ubuntu-snapshot.png)
+
+---
+
+## Exercise 5: Install Jenkins as a Docker Container
+
+Runs Jenkins as a Docker container on an Ubuntu EC2 instance, with volumes that mount the Docker socket and binary into the container so Jenkins can execute Docker commands inside its pipelines.
+
+### Why This Matters
+
+Running Jenkins as a Docker container is the modern, preferred approach over installing it directly on the OS. Containers are portable, isolated, and easy to replace — if Jenkins breaks, you restart the container rather than troubleshooting a system-level installation. Mounting the Docker socket into the container lets Jenkins build and push Docker images as part of CI pipelines, which is the foundation of container-based CI/CD workflows. This exercise demonstrates how Ansible can manage Docker containers on remote servers using the `community.docker` collection.
+
+### Architecture
+
+```mermaid
+graph LR
+    A[Local Machine\nAnsible Control Node] -->|amazon.aws module| B[AWS EC2\nUbuntu 22.04\nt2.medium]
+    A -->|writes public IP| C[hosts]
+    A -->|SSH: install Docker + run container| B
+    B --> D[Jenkins Container\njenkins/jenkins:lts\nport 8080]
+    B --> E[Docker Socket\n/var/run/docker.sock]
+    B --> F[jenkins_home volume\n/var/jenkins_home]
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `3-provision-jenkins-ec2.yaml` | Provisions Ubuntu EC2 and writes IP to `hosts` under `[jenkins_server]` |
+| `5-install-jenkins-docker.yaml` | Installs Docker, starts Jenkins container with volumes, sets socket permissions |
+
+### How the Ansible Playbook Works
+
+`5-install-jenkins-docker.yaml` runs four plays in sequence:
+
+| Play | Action |
+|------|--------|
+| Get server IP | Queries AWS for the running `jenkins-server` public IP using `amazon.aws.ec2_instance_info` |
+| Prepare server | Installs `docker.io`, `python3-pip`, `python3-docker` via apt; starts Docker with `systemd` |
+| Start Jenkins container | Finds Docker binary with `which docker`; starts `jenkins/jenkins:lts` container using `community.docker.docker_container` with socket, binary, and data volumes |
+| Set Docker permission | Sets `/var/run/docker.sock` to mode `666` so the Jenkins container user can run Docker commands |
+
+### Step 1 — Provision Ubuntu EC2 Instance
+
+```bash
+ansible-playbook 3-provision-jenkins-ec2.yaml \
+  --extra-vars "ssh_key_path=/home/ndu/Downloads/ansible.pem \
+  aws_region=ca-central-1 \
+  key_name=ansible \
+  subnet_id=subnet-0012ce5d3a6028493 \
+  ami_id=ami-073095b1f097db96d \
+  ssh_user=ubuntu"
+```
+
+### Step 2 — Confirm Instance is Ready
+
+```bash
+ssh -i /home/ndu/Downloads/ansible.pem ubuntu@<ec2-public-ip> "echo ready"
+```
+
+### Step 3 — Install Docker and Start Jenkins Container
+
+```bash
+ansible-playbook -i hosts 5-install-jenkins-docker.yaml \
+  --extra-vars "aws_region=ca-central-1"
+```
+
+### Step 4 — Get Jenkins Admin Password
+
+SSH into the server and retrieve the password from inside the container:
+
+```bash
+ssh -i /home/ndu/Downloads/ansible.pem ubuntu@<ec2-public-ip>
+sudo docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+No base64 decoding needed — the password is printed as plain text.
+
+### Verify Deployment
+
+Access Jenkins in browser:
+```
+http://<ec2-public-ip>:8080
+```
+
+Verify the Jenkins container is running on the server:
+```bash
+sudo docker ps
+```
+
+![Jenkins Dashboard - Docker](images/jenkins-docker-snapshot.png)
