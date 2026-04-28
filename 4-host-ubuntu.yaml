@@ -1,0 +1,36 @@
+- name: Update apt repo cache
+  apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+- name: Install java 21
+  apt: name=openjdk-21-jdk
+- name: Set Java 21 as default
+  alternatives:
+    name: java
+    path: /usr/lib/jvm/java-21-openjdk-amd64/bin/java
+
+- name: Remove old keyring if present
+  file:
+    path: /usr/share/keyrings/jenkins-keyring.gpg
+    state: absent
+- name: Import Jenkins GPG key from keyserver
+  shell: |
+    gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 7198F4B714ABFC68
+    gpg --export 7198F4B714ABFC68 > /usr/share/keyrings/jenkins-keyring.gpg
+  register: gpg_result
+- debug: msg={{ gpg_result.stderr_lines }}
+- name: Add Jenkins repository
+  copy:
+    content: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/\n"
+    dest: /etc/apt/sources.list.d/jenkins.list
+    
+- name: Update apt repo cache
+  apt: update_cache=yes force_apt_get=yes
+
+- name: Install Jenkins
+  apt: name=jenkins
+
+- name: Install Docker
+  apt: name=docker.io
+- name: Start Docker
+  service: 
+    name: docker
+    state: started
