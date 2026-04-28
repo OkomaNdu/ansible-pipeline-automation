@@ -2,4 +2,5 @@
 159.203.30.6 ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_user=root
 
 [jenkins_server]
+3.96.128.183 ansible_ssh_private_key_file=/home/ndu/Downloads/ansible.pem ansible_user=ubuntu
 15.223.200.184 ansible_ssh_private_key_file=/home/ndu/Downloads/ansible.pem ansible_user=ubuntu
