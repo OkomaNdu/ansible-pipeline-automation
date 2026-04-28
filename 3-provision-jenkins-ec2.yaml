@@ -33,8 +33,8 @@
     register: ec2_result
   - name: update hosts file
     lineinfile:
-      path: "hosts-jenkins-server"
+      path: "hosts"
       line: "{{ ec2_result.instances[0].public_ip_address }} ansible_ssh_private_key_file={{ ssh_key_path }} ansible_user={{ ssh_user }}"
-      insertbefore: BOF
+      insertafter: "\\[jenkins_server\\]"
     register: file_result
   - debug: msg={{ file_result }}
