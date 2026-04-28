@@ -120,3 +120,91 @@ ansible-playbook -i hosts 2-push-to-nexus.yaml \
 Browse to **Nexus → Browse → maven-snapshots** and confirm the artifact is present.
 
 ![Nexus maven-snapshots](images/nexus-snapshot.png)
+
+---
+
+## Exercise 3: Install Jenkins on EC2 (Amazon Linux)
+
+Provisions an Amazon Linux EC2 instance on AWS and installs Jenkins, Docker, and Node.js on it using two separate playbooks — one for provisioning the server and one for configuring it.
+
+### Architecture
+
+```mermaid
+graph LR
+    A[Local Machine\nAnsible Control Node] -->|amazon.aws module| B[AWS EC2\nAmazon Linux 2023\nt2.medium]
+    A -->|writes public IP| C[hosts-jenkins-server]
+    A -->|SSH: install + configure| B
+    B --> D[Jenkins :8080]
+    B --> E[Docker]
+    B --> F[Node.js v8.0.0\nvia NVM]
+```
+
+### Prerequisites
+
+- AWS credentials configured: `aws configure`
+- Python boto3 installed: `sudo apt install python3-boto3`
+- Ansible AWS collection: `ansible-galaxy collection install amazon.aws`
+- EC2 key pair created and `.pem` file available locally
+- `hosts-jenkins-server` file created: `touch hosts-jenkins-server`
+- Port 8080 open in AWS Security Group
+
+### Step 1 — Provision EC2 Instance
+
+```bash
+ansible-playbook 3-provision-jenkins-ec2.yaml \
+  --extra-vars "ssh_key_path=/home/ndu/Downloads/ansible.pem \
+  aws_region=ca-central-1 \
+  key_name=ansible \
+  subnet_id=subnet-0012ce5d3a6028493 \
+  ami_id=ami-0495a76ecf381a767 \
+  ssh_user=ec2-user"
+```
+
+This will:
+1. Query VPC information in the specified region
+2. Create an EC2 `t2.medium` instance tagged `jenkins-server` with a public IP
+3. Wait 60 seconds for the public IP to be assigned
+4. Write the public IP into `hosts-jenkins-server`
+
+### Step 2 — Install and Configure Jenkins
+
+Wait 2-3 minutes for the instance to fully boot, then run:
+
+```bash
+ansible-playbook -i hosts-jenkins-server 3-install-jenkins-ec2.yaml \
+  --extra-vars "aws_region=ca-central-1"
+```
+
+This will:
+1. Install Java 21 (Amazon Corretto) and set it as default
+2. Add Jenkins repository and install Jenkins
+3. Install Docker
+4. Install Node.js v8.0.0 via NVM
+5. Start Jenkins and print the initial admin password
+
+### What the Playbook Does
+
+| Play | Action |
+|------|--------|
+| Get server IP | Queries AWS for the `jenkins-server` public IP |
+| Prepare server | Installs Java 21, Jenkins, Docker, Node.js |
+| Start Jenkins | Starts Jenkins service, verifies port 8080, prints admin password |
+
+### Verify Deployment
+
+Access Jenkins in browser:
+```
+http://<ec2-public-ip>:8080
+```
+
+Get the admin password from playbook output (base64 encoded) and decode it:
+```bash
+echo "<base64-password>" | base64 --decode
+```
+
+**Actual run output:**
+```
+Jenkins listening on port 8080
+Admin password: 84794b58b27c4c7990fa4f38c9366ff4
+EC2 Public IP: 16.52.168.187
+```
