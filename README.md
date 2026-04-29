@@ -647,3 +647,273 @@ sudo mysql -u root             # verify MySQL is running
 SHOW DATABASES;                # verify my-app-db exists
 SELECT User, Host FROM mysql.user;  # verify my-user exists
 ```
+
+---
+
+## Exercise 8: Deploy Java MySQL Application with MySQL Helm Chart on EKS
+
+Extends Exercise 7 by replacing the single MySQL pod with a production-grade MySQL cluster using the Bitnami Helm chart — 1 primary and 2 secondary replicas, backed by persistent EBS volumes. The entire deployment runs on AWS EKS and is fully automated via a single Ansible playbook.
+
+### Why This Matters
+
+Running a single MySQL pod in Kubernetes has no persistence or redundancy — if the pod restarts, all data is lost. This exercise introduces StatefulSets, PersistentVolumeClaims, and Helm chart-based deployments to address that. Using the Bitnami MySQL chart provides a battle-tested replication configuration out of the box. Running on EKS reflects how production workloads are actually operated: cloud-managed Kubernetes with cloud-native storage.
+
+### Architecture
+
+```mermaid
+graph TD
+    A[Local Machine\nAnsible Control Node] -->|Helm install| B[nginx-ingress-controller\nnamespace: ingress]
+    A -->|kubernetes.core.helm| C[Bitnami MySQL Chart\narchitecture: replication]
+    A -->|kubernetes.core.k8s| D[Java App Manifests]
+    C --> E[mysql-release-primary-0\nStatefulSet, PVC: gp2-csi 8Gi]
+    C --> F[mysql-release-secondary-0\nStatefulSet, PVC: gp2-csi 8Gi]
+    C --> G[mysql-release-secondary-1\nStatefulSet, PVC: gp2-csi 8Gi]
+    D --> H[java-app-deployment\nndubuisip/demo-app:java-mysql-app]
+    D --> I[java-app-ingress\nELB hostname]
+    H -->|DB_SERVER=mysql-release-primary| E
+    B --> I --> H
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `8-deploy-on-k8s.yaml` | Ansible playbook — adds bitnami repo, deploys MySQL Helm chart and Java app manifests |
+| `kubernetes-manifests/exercise-8/mysql-chart-values-eks.yaml` | Bitnami MySQL Helm values — replication mode, gp2-csi storage, ECR Public registry |
+| `kubernetes-manifests/exercise-8/java-app.yaml` | Java app Deployment + ClusterIP Service on port 8080 |
+| `kubernetes-manifests/exercise-8/java-app-ingress.yaml` | Ingress routing ELB hostname → java-app-service |
+| `kubernetes-manifests/exercise-8/java-db-config.yaml` | ConfigMap: `db_server=mysql-release-primary` |
+| `kubernetes-manifests/exercise-8/java-db-secret.yaml` | K8s Secret: DB credentials |
+
+### Prerequisites
+
+- AWS EKS cluster running with 2 `t3.medium` nodes:
+  ```bash
+  eksctl create cluster --name my-MySQL-K8s-Cluster \
+    --region ca-central-1 \
+    --nodegroup-name my-nodegroup \
+    --node-type t3.medium \
+    --nodes 2
+  ```
+- EBS CSI driver addon installed:
+  ```bash
+  eksctl create addon --name aws-ebs-csi-driver \
+    --cluster my-MySQL-K8s-Cluster \
+    --region ca-central-1 --force
+  ```
+- `AmazonEBSCSIDriverPolicy` attached to the node IAM role
+- Custom `gp2-csi` StorageClass created using the EBS CSI provisioner:
+  ```bash
+  kubectl apply -f - <<EOF
+  apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: gp2-csi
+  provisioner: ebs.csi.aws.com
+  volumeBindingMode: WaitForFirstConsumer
+  parameters:
+    type: gp2
+  EOF
+  ```
+- Helm `ingress-nginx` repo added:
+  ```bash
+  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  helm repo update
+  ```
+- `kubernetes.core` Ansible collection installed
+
+> **Note:** Bitnami removed container images from Docker Hub. The `global.imageRegistry: public.ecr.aws` value in `mysql-chart-values-eks.yaml` redirects all image pulls to Amazon ECR Public Gallery, which is free and fast within AWS. `global.security.allowInsecureImages: true` bypasses Bitnami's registry origin check.
+
+### Execution
+
+```bash
+ansible-playbook 8-deploy-on-k8s.yaml \
+  --extra-vars "docker_user=<your-dockerhub-username> docker_pass=<your-dockerhub-password>"
+```
+
+### What the Playbook Does
+
+| Task | Action |
+|------|--------|
+| Install docker python module | Installs the `docker` Python package (`--break-system-packages` for Ubuntu 24.x) |
+| Add bitnami helm repo | Adds `https://charts.bitnami.com/bitnami` as a Helm repository |
+| Login to Docker Hub | Creates `~/.docker/config.json` for the registry pull secret |
+| Create docker registry secret | Creates K8s Secret `my-registry-key` for Java app image pull |
+| Deploy nginx ingress controller | Installs `ingress-nginx/ingress-nginx` via Helm into the `ingress` namespace |
+| Deploy MySQL chart | Installs `bitnami/mysql` with replication mode (1 primary + 2 secondaries) and gp2-csi PVCs |
+| Deploy Java app manifests | Applies all `java-*.yaml` from `kubernetes-manifests/exercise-8/` |
+
+### Kubernetes Resources Deployed
+
+```
+NAME                                   READY   STATUS    AGE
+java-app-deployment-7d49b5cf9f-fgb68   1/1     Running   —
+mysql-release-primary-0                1/1     Running   —
+mysql-release-secondary-0              1/1     Running   —
+mysql-release-secondary-1              1/1     Running   —
+
+NAME                             STATUS   VOLUME                 CAPACITY   STORAGECLASS
+data-mysql-release-primary-0     Bound    pvc-...                8Gi        gp2-csi
+data-mysql-release-secondary-0   Bound    pvc-...                8Gi        gp2-csi
+
+NAME                               TYPE        CLUSTER-IP       PORT(S)
+java-app-service                   ClusterIP   10.100.27.203    8080/TCP
+mysql-release-primary              ClusterIP   10.100.2.38      3306/TCP
+mysql-release-secondary            ClusterIP   10.100.230.25    3306/TCP
+```
+
+### Verify Deployment
+
+```bash
+kubectl get pods
+kubectl get pvc
+kubectl get svc
+kubectl get ingress
+```
+
+Get the ELB hostname assigned to the ingress controller:
+```bash
+kubectl get svc -n ingress
+```
+
+Access the application:
+```
+http://<elb-hostname>
+```
+
+**AWS EKS Cluster — Active with 17 pods running across 2 nodes:**
+
+![EKS Cluster Dashboard](images/eks-cluster-dashboard.png)
+
+**AWS EC2 — 2 EKS worker nodes (t3.medium) running in ca-central-1:**
+
+![EKS EC2 Nodes](images/eks-ec2-nodes.png)
+
+---
+
+## Exercise 7: Deploy Java MySQL Application in Kubernetes
+
+Uses an Ansible playbook to fully automate the deployment of a Java MySQL application on a local Minikube Kubernetes cluster. The playbook handles Docker Hub authentication, creates a K8s image pull secret, installs the nginx ingress controller via Helm, and deploys all Kubernetes manifests in a single run.
+
+### Why This Matters
+
+Deploying applications to Kubernetes manually with `kubectl apply` is fine for one-off tasks, but it doesn't scale. This exercise shows how Ansible can orchestrate the entire Kubernetes deployment lifecycle — from Docker registry authentication to ingress controller installation — making K8s deployments as repeatable and auditable as any other infrastructure change. The `kubernetes.core` collection bridges Ansible's idempotent model with Kubernetes' declarative model.
+
+### Architecture
+
+```mermaid
+graph TD
+    A[Local Machine\nAnsible Control Node] -->|Helm install| B[nginx-ingress-controller\nnamespace: ingress]
+    A -->|kubernetes.core.k8s| C[K8s Manifests\nnamespace: default]
+    C --> D[java-app-deployment\nndubuisip/demo-app:java-mysql-app\nport 8080]
+    C --> E[mysql-deployment\nmysql:8.0\nport 3306]
+    C --> F[java-app-service\nClusterIP :8080]
+    C --> G[mysql-service\nClusterIP :3306]
+    C --> H[java-app-ingress\njava-app.192.168.49.2.nip.io]
+    C --> I[db-secret\nDB credentials]
+    C --> J[db-config\nConfigMap: DB_SERVER=mysql-service]
+    B -->|routes traffic| H
+    H --> F
+    F --> D
+    D -->|DB_SERVER=mysql-service| G
+    G --> E
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `7-deploy-on-k8s.yaml` | Ansible playbook — installs docker module, logs into Docker Hub, creates registry secret, deploys ingress controller and manifests |
+| `kubernetes-manifests/exercise-7/java-app.yaml` | Java app Deployment + ClusterIP Service on port 8080 |
+| `kubernetes-manifests/exercise-7/mysql.yaml` | MySQL 8.0 Deployment + ClusterIP Service on port 3306 |
+| `kubernetes-manifests/exercise-7/java-app-ingress.yaml` | Ingress resource routing `java-app.192.168.49.2.nip.io` → java-app-service |
+| `kubernetes-manifests/exercise-7/db-secret.yaml` | K8s Secret: `db_user`, `db_pwd`, `db_root_pwd`, `db_name` |
+| `kubernetes-manifests/exercise-7/db-config.yaml` | K8s ConfigMap: `db_server=mysql-service` |
+
+### Prerequisites
+
+- Minikube running: `minikube start`
+- Helm installed and ingress-nginx repo added:
+  ```bash
+  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  helm repo update
+  ```
+- `kubernetes.core` Ansible collection installed:
+  ```bash
+  ansible-galaxy collection install kubernetes.core
+  ```
+- Docker image pushed to Docker Hub:
+  ```bash
+  cd ~/DevOps-Project/Configuration-Management-with-Ansible/ansible-pipeline-automation
+  docker build -t ndubuisip/demo-app:java-mysql-app .
+  docker push ndubuisip/demo-app:java-mysql-app
+  ```
+- Get the Minikube IP:
+  ```bash
+  minikube ip   # → 192.168.49.2
+  ```
+
+> **Note:** If `minikube addons enable ingress` was previously run, delete the conflicting IngressClass before the playbook installs via Helm:
+> ```bash
+> kubectl delete ingressclass nginx
+> ```
+
+### Execution
+
+```bash
+ansible-playbook 7-deploy-on-k8s.yaml \
+  --extra-vars "docker_user=ndubuisip docker_pass=<your-dockerhub-password>"
+```
+
+### What the Playbook Does
+
+| Task | Action |
+|------|--------|
+| Install docker python module | Installs the `docker` Python package (with `--break-system-packages` for Ubuntu 24.x PEP 668) |
+| Login to Docker Hub | Runs `docker login` to create `~/.docker/config.json` |
+| Create docker registry secret | Creates K8s Secret `my-registry-key` from the Docker config — used by the java-app pod to pull the private image |
+| Deploy nginx ingress controller | Installs `ingress-nginx/ingress-nginx` via Helm into the `ingress` namespace |
+| Deploy all K8s manifests | Applies all `*.yaml` files from `kubernetes-manifests/exercise-7/` using `kubernetes.core.k8s` |
+
+### Kubernetes Resources Deployed
+
+```
+NAMESPACE   NAME                                   READY   STATUS
+default     java-app-deployment-856884fd5d-s86vz   1/1     Running
+default     mysql-deployment-8476745fff-5547h       1/1     Running
+
+NAME               TYPE        CLUSTER-IP      PORT(S)
+java-app-service   ClusterIP   10.105.82.180   8080/TCP
+mysql-service      ClusterIP   10.108.8.34     3306/TCP
+
+NAME               HOSTS                          PORTS
+java-app-ingress   java-app.192.168.49.2.nip.io   80
+```
+
+### Verify Deployment
+
+```bash
+kubectl get pods
+kubectl get service
+kubectl get ingress
+```
+
+Access the application in the browser:
+```
+http://java-app.192.168.49.2.nip.io
+```
+
+Or verify with curl:
+```bash
+curl http://java-app.192.168.49.2.nip.io
+```
+
+The "Team member roles" page confirms the Java application is running in Kubernetes and successfully connecting to the MySQL database pod via the `mysql-service` ClusterIP.
+
+![Exercise 7 Web Application](images/K8s-web-app.png)
+
+**Kubernetes Dashboard — Both deployments healthy (1/1 pods Running):**
+
+![Kubernetes Dashboard](images/K8s-dashboard.png)
+
+---
