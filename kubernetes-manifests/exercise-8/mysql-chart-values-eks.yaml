@@ -1,0 +1,28 @@
+global:
+  imageRegistry: public.ecr.aws
+  security:
+    allowInsecureImages: true
+
+architecture: replication
+auth:
+  rootPassword: secret-root-pass
+  database: my-app-db
+  username: my-user
+  password: my-pass
+
+# enable init container that changes the owner and group of the persistent volume mountpoint to runAsUser:fsGroup
+volumePermissions:
+  enabled: false
+
+primary:
+  persistence:
+    accessModes: ["ReadWriteOnce"]
+    storageClass: gp2-csi
+
+secondary:
+  # 1 primary and 2 secondary replicas
+  replicaCount: 2
+  persistence:
+    accessModes: ["ReadWriteOnce"]
+    # storage class for EKS volumes
+    storageClass: gp2-csi
