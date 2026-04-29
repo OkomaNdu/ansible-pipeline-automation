@@ -420,3 +420,230 @@ sudo docker ps
 ```
 
 ![Jenkins Dashboard - Docker](images/jenkins-docker-snapshot.png)
+
+---
+
+## Exercise 6: Web Server and Database Server Configuration
+
+Provisions a dedicated Ansible control plane server on AWS, then uses it to provision and configure a Java web application on a public web server connected to a private MySQL database server — all within the same VPC. The database server has no public IP and can only be reached through the NAT gateway for outbound traffic.
+
+### Why This Matters
+
+Production systems never expose databases directly to the internet. This exercise demonstrates the correct network architecture separation: a public-facing web tier and a private, inaccessible database tier communicating only over an internal VPC network. Using a dedicated Ansible control server reflects real-world practices where automation is driven from a hardened, internal machine — not a developer's laptop. Dynamic inventory eliminates the need to hardcode IPs, making the automation resilient to server restarts and IP changes.
+
+### Architecture
+
+```mermaid
+graph TD
+    A[Local Machine] -->|Provision + Configure| B[Ansible Control Server\n3.96.126.4\nPublic Subnet]
+    B -->|Dynamic Inventory\naws_ec2 plugin| C[AWS EC2 API]
+    B -->|ansible-playbook| D[Web Server\n15.223.67.56\nPublic Subnet\nPort 8080]
+    B -->|ansible-playbook| E[Database Server\nPrivate Subnet\nNo Public IP]
+    D -->|DB connection\nVPC internal| E
+    E -->|Outbound only\nNAT Gateway| F[Internet]
+```
+
+### AWS Infrastructure
+
+| Server | Subnet | Public IP | Key Pair |
+|---|---|---|---|
+| ansible-server | Public (`subnet-0012ce5d3a6028493`) | `3.96.126.4` | `ansible-control-server-key` |
+| web-server | Public (`subnet-0012ce5d3a6028493`) | `15.223.67.56` | `ansible-managed-server-key` |
+| database-server | Private (`subnet-0b9be228629f479d3`) | None | `ansible-managed-server-key` |
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `6-provision-ansible-server.yaml` | Provisions the Ansible control plane EC2 instance |
+| `6-configure-ansible-server.yaml` | Installs Ansible, copies keys, playbooks, AWS credentials, and Java JAR |
+| `6-provision-app-servers.yaml` | Provisions web-server (public) and database-server (private) |
+| `6-configure-app-servers.yaml` | Installs MySQL on DB server; deploys Java app on web server |
+| `6-inventory_aws_ec2.yaml` | Dynamic inventory using `aws_ec2` plugin for `ca-central-1` |
+| `6-vars.yaml` | MySQL configuration: root password, database name, user credentials |
+
+### Pre-requisites
+
+#### 1. Create AWS Key Pairs
+In **EC2 → Key Pairs**, create two key pairs and download the `.pem` files:
+```bash
+chmod 400 ~/Downloads/ansible-control-server-key.pem
+chmod 400 ~/Downloads/ansible-managed-server-key.pem
+```
+
+#### 2. Set Up NAT Gateway for Private Subnet
+In **VPC Console**:
+- Create a NAT gateway (`my-nat`) in the public subnet with an Elastic IP
+- Create a route table (`my-db-rt`) with route `0.0.0.0/0 → my-nat`
+- Associate `my-db-rt` with the private subnet (`subnet-0b9be228629f479d3`)
+
+#### 3. Update Dynamic Inventory Region
+`6-inventory_aws_ec2.yaml`:
+```yaml
+plugin: aws_ec2
+regions:
+- ca-central-1
+keyed_groups:
+- key: tags
+  prefix: tag
+```
+
+#### 4. Uncomment Exercise 6 Lines in `ansible.cfg`
+```ini
+[defaults]
+host_key_checking = False
+inventory = hosts
+enable_plugins = amazon.aws.aws_ec2
+remote_user = ubuntu
+private_key_file = /home/ubuntu/ansible-managed-server-key.pem
+```
+
+#### 5. Build the Java JAR Locally
+```bash
+cd ~/DevOps-Project/Docker/Java-Docker-Project
+gradle build
+# Output: build/libs/docker-exercises-project-1.0-SNAPSHOT.jar
+```
+
+---
+
+### Phase 1 — From Local Machine
+
+#### Step 1 — Provision the Ansible Control Server
+
+```bash
+cd ~/DevOps-Project/Configuration-Management-with-Ansible/ansible-pipeline-automation
+
+ansible-playbook 6-provision-ansible-server.yaml \
+  --extra-vars "aws_region=ca-central-1 \
+  subnet_id=subnet-0012ce5d3a6028493 \
+  ami_id=ami-073095b1f097db96d"
+```
+
+Creates a `t2.micro` Ubuntu EC2 instance tagged `ansible-server` with a public IP using `ansible-control-server-key`.
+
+#### Step 2 — Verify Ansible Server is Ready
+
+```bash
+ssh -i ~/Downloads/ansible-control-server-key.pem ubuntu@3.96.126.4 "echo ready"
+```
+
+#### Step 3 — Configure the Ansible Control Server
+
+```bash
+ansible-playbook -i 6-inventory_aws_ec2.yaml 6-configure-ansible-server.yaml
+```
+
+This installs on the ansible-server:
+- `ansible` and `python3-boto3` (via apt, then upgraded via pip to `ansible-core 2.17+`)
+- `geerlingguy.mysql` Ansible Galaxy role
+- `amazon.aws` Ansible collection
+- AWS credentials (`~/.aws/credentials`)
+- Both `.pem` key files from `~/Downloads/ansible-*.pem`
+- All `6-*.yaml` playbooks and `ansible.cfg`
+- Java JAR (`docker-exercises-project-1.0-SNAPSHOT.jar`)
+
+> **Note:** After apt install, Ansible on Ubuntu 22.04 is version `2.10.8` which is incompatible with newer `amazon.aws` collections. Upgrade on the ansible-server:
+> ```bash
+> sudo apt-get install -y python3-pip
+> pip3 install ansible --upgrade
+> # Verify: ansible --version → ansible [core 2.17.x]
+> ```
+
+---
+
+### Phase 2 — From the Ansible Control Server
+
+SSH into the ansible-server:
+```bash
+ssh -i ~/Downloads/ansible-control-server-key.pem ubuntu@3.96.126.4
+```
+
+#### Step 4 — Provision Web Server and Database Server
+
+```bash
+ansible-playbook 6-provision-app-servers.yaml \
+  --extra-vars "aws_region=ca-central-1 \
+  key_name=ansible-managed-server-key \
+  subnet_id_web=subnet-0012ce5d3a6028493 \
+  subnet_id_db=subnet-0b9be228629f479d3 \
+  ami_id=ami-073095b1f097db96d"
+```
+
+Creates:
+- `database-server` — `t2.micro`, no public IP, in private subnet, tagged `server: database`
+- `web-server` — `t2.micro`, public IP, in public subnet, tagged `server: web`
+
+#### Step 5 — Wait 2–3 Minutes for Both Servers to Boot
+
+#### Step 6 — Configure Both Servers
+
+```bash
+ansible-playbook -i 6-inventory_aws_ec2.yaml 6-configure-app-servers.yaml
+```
+
+**On `tag_Name_database_server` (database-server):**
+- Installs MySQL via `geerlingguy.mysql` role using settings from `6-vars.yaml`
+- Creates database `my-app-db` with `latin1` encoding
+- Creates user `my-user` with full privileges on `my-app-db`
+- Validates MySQL is running: `ps aux | grep mysql`
+
+**On `tag_Name_web_server` (web-server):**
+- Installs `openjdk-17-jdk`
+- Copies JAR from ansible-server (`/home/ubuntu/docker-exercises-project-1.0-SNAPSHOT.jar`)
+- Starts the Java app with DB environment variables pointing to the private IP of the database server:
+  ```
+  DB_USER=my-user
+  DB_PWD=my-pass
+  DB_SERVER=<private-ip-of-database-server>
+  DB_NAME=my-app-db
+  ```
+- Validates Java process is running: `ps aux | grep java`
+
+---
+
+### Verify Deployment
+
+Open port `8080` in the web server's security group (Custom TCP, source `0.0.0.0/0`), then access:
+
+```
+http://15.223.67.56:8080
+```
+
+**EC2 Instances — All three servers running:**
+
+![Exercise 6 EC2 Instances](images/exercise6-ec2-instances.png)
+
+**Java Web Application — Connected to MySQL database:**
+
+![Exercise 6 Web Application](images/exercise6-web-app.png)
+
+The "Team member roles" page confirms the Java application on the web server is successfully reading data from the MySQL database server running in the private subnet.
+
+---
+
+### Inspecting the Servers
+
+**Ansible control server:**
+```bash
+ssh -i ~/Downloads/ansible-control-server-key.pem ubuntu@3.96.126.4
+ls ~/                          # verify all files were copied
+ansible --version              # verify ansible-core 2.17+
+cat ~/.aws/credentials         # verify AWS credentials
+```
+
+**Web server:**
+```bash
+ssh -i ~/Downloads/ansible-managed-server-key.pem ubuntu@15.223.67.56
+ps aux | grep java             # verify Java app is running
+java -version                  # verify Java 17
+```
+
+**Database server** (SSH via ansible-server as bastion):
+```bash
+# From the ansible-server:
+ssh -i ~/ansible-managed-server-key.pem ubuntu@<database-server-private-ip>
+sudo mysql -u root             # verify MySQL is running
+SHOW DATABASES;                # verify my-app-db exists
+SELECT User, Host FROM mysql.user;  # verify my-user exists
+```
